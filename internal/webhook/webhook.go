@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -359,8 +360,54 @@ func (w *Webhook) loopOnlineStatus() {
 	}
 }
 
+type URLMapping struct {
+	Prefix string `json:"prefix"`
+	ReqUrl string `json:"reqUrl"`
+}
+
+func (w *Webhook) selectReqUrl(event string, data []byte) (string, error) {
+	var mappings []URLMapping
+	err := json.Unmarshal([]byte(options.G.Webhook.HTTPAddr), &mappings)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse URL mappings: %v", err)
+	}
+
+	var prefix string
+
+	switch event {
+	case "user.onlinestatus":
+		// Example: [uid1-0-1,uid2-1-0]
+		parts := strings.Split(strings.Trim(string(data), "[]"), "-")
+		if len(parts) > 0 {
+			prefix = parts[0][:2] // Extract prefix from the first UID
+		}
+	case "msg.offline", "msg.notify":
+		// Example: [{"FromUID":"AN123123","MessageID":"234234"}]
+		var messages []map[string]string
+		err := json.Unmarshal(data, &messages)
+		if err != nil || len(messages) == 0 {
+			return "", errors.New("failed to parse message data")
+		}
+		prefix = messages[0]["FromUID"][:2] // Extract prefix from the first FromUID
+	default:
+		return "", errors.New("unsupported event type")
+	}
+
+	for _, mapping := range mappings {
+		if mapping.Prefix == prefix {
+			return mapping.ReqUrl, nil
+		}
+	}
+
+	return "", errors.New("no matching URL found for prefix")
+}
 func (w *Webhook) sendWebhookForHttp(event string, data []byte) error {
-	eventURL := fmt.Sprintf("%s?event=%s", options.G.Webhook.HTTPAddr, event)
+	eventURL, err := w.selectReqUrl(event, data)
+	if err != nil {
+		return err
+	}
+	eventURL = fmt.Sprintf("%s?event=%s", eventURL, event)
+	//eventURL := fmt.Sprintf("%s?event=%s", options.G.Webhook.HTTPAddr, event)
 	startTime := time.Now().UnixNano() / 1000 / 1000
 	w.Debug("webhook开始请求", zap.String("eventURL", eventURL))
 	resp, err := w.httpClient.Post(eventURL, "application/json", bytes.NewBuffer(data))
